@@ -1,0 +1,4 @@
+*.db
+SystemPrompt.txt
+.env
+.venv/*

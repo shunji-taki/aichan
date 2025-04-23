@@ -1,0 +1,4 @@
+slack_bolt
+openai
+tiktoken
+python-dotenv
