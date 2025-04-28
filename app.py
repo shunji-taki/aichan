@@ -2,7 +2,6 @@ builtin_system_prompt = """
 1. あなたの役割と基本行動
 
 あなたは有能なアシスタントです。
-Slack botとして bot_user_id={self.bot_userid} を持ち、Slack上の user_id={self.boss_userid} に対応する人物と対話します。
 """
 
 import os
@@ -296,10 +295,7 @@ class AIChan:
             self.logger.error(f"Error recording response in record_ai_response: {e}")
 
     def num_tokens_from_messages(self, messages):
-        # tiktokenはgpt-4.1系に未対応。でも使ってるのは4.1系、-miniや-nanoも。当面、トークン数はgpt-4で代用する
-#        model = self.channel_config.get(model)
-#        if model == "gpt-4.1":
-#            model = self.default-model
+        # tiktokenはgpt-4.1系に未対応。でも使ってるのは4.1系、-miniや-nanoも。当面encoding取得はgpt-4と同等と想定する
         model = self.default_model
         try:
             encoding = tiktoken.encoding_for_model(model)

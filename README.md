@@ -1,4 +1,4 @@
-# AIちゃん (aichan - slack bot for OpenAI)
+# AIちゃん (Aichan - Slack Bot for OpenAI)
 
 Slack 上で OpenAI API を活用する、会話型 AI ボットです。
 
@@ -57,14 +57,14 @@ python app.py
 - /ai-tweet             : ときどき発話する機能を設定する
 
 ## データファイル（SQLite）
-	•	conversation.db : 会話ログの記録
-	•	sysmemory.db    : システムプロンプトやトークン統計の保存
+- conversation.db : 会話ログの記録
+- sysmemory.db    : システムプロンプトやトークン統計の保存
 
 ## 依存ライブラリ（抜粋）
-	•	slack-bolt
-	•	openai
-	•	python-dotenv
-	•	tiktoken
+- slack-bolt
+- openai
+- python-dotenv
+- tiktoken
 
 ## ライセンス
 
