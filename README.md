@@ -1,7 +1,4 @@
-# aichan
-Slack bot that connect to OpenAI API
-
-# AIちゃん (aichan)
+# AIちゃん (aichan - slack bot for OpenAI)
 
 Slack 上で OpenAI API を活用する、会話型 AI ボットです。
 
@@ -23,29 +20,34 @@ Slack Bolt + OpenAI + SQLite3 によるシンプルかつ柔軟な構成です�
 
 ## セットアップ方法
 1.	リポジトリをクローン
-git clone https://github.com/shunji-taki/aichan.git
 
+```bash
+git clone https://github.com/shunji-taki/aichan.git
 cd aichan
+```
 
 2.	Python 仮想環境を作成し、依存関係をインストール
+
+```bash
 python3 -m venv venv
-
 source venv/bin/activate
-
 pip install -r requirements.txt
+```
 
-3.	.env ファイルを作成し、以下の環境変数を設定
+3.	.env ファイルを作成し、以下を記述
 
+```env
 SLACK_BOT_TOKEN=（Slack Bot Token）
-
 SLACK_APP_TOKEN=（Socket Mode Token）
-
 OPENAI_API_KEY=（OpenAI API Key）
-
 BOSS_SLACK_USERID=（オーナーのSlack User ID）
+```
 
 4.	アプリ起動
+
+```bash
 python app.py
+```
 
 ## スラッシュコマンド一覧
 - /ai_replace_sysprompt : システムプロンプトを新しい内容に置き換える
