@@ -617,7 +617,7 @@ s                > AIアシスタント「AIちゃん」の心にふっと浮か
         １時間おきにwake upして、たまに自発的に投稿する
         """
         while True:
-            time.sleep(60)
+            time.sleep(3600)
             for channel in self.channel_config.keys():
                 percent = int(self.channel_config[channel]["verbose"])
                 if percent <= 0:
