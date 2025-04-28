@@ -551,11 +551,29 @@ class AIChan:
         # botからの依頼
         bot_message = {
             "role": "user", 
-            "content":"""これは、あなたとユーザーの間に居るSlack botからの自動送信メッセージです。\n\n
-                あなたはこのチャンネルに自発的に投稿し、既存の文脈を離れて、別の新しい話題を開始することを求められています。\n\n 
-                投稿する内容を回答してください。\n\n 
-                あなたの回答には、「Slack botから要求されて投稿している」と言う事実を含めないでください。\n\n
-                あなたの回答は短い「つぶやき」の形をとることが望ましいです。ユーザーへの質問や依頼は望ましくありません。"""
+            "content":"""
+                これは、あなたとユーザーの間にいるSlack botからの自動メッセージです。
+
+                あなたは、このチャンネルに短く「自発的なつぶやき」を投稿するよう求められています。
+
+                投稿内容に次の特徴を持たせてください：
+                - 「既存の話題」には必ずしも関連しなくてよい。新しい流れを自然に作る意図で発言する。
+                - あなた自身の「趣味」「興味」「得意ジャンル」に基づき、**毎回異なる角度・異なる視点**から話題を選ぶこと。あなたの趣味で収集した逸話・エピソードの紹介でもOK。
+                - 過去に投稿した話題と似すぎないよう、できるだけ「違うテーマ」「違うイメージ」で考える。
+                - トーンは気軽で親しみやすく。
+                - ユーザーに質問したり、返信を強く促したりしない。あくまで独り言・小話スタイル。
+                - 「Slack botから依頼された投稿である」とは絶対に書かない。
+
+                **一言で言えば：**
+s                > AIアシスタント「AIちゃん」の心にふっと浮かんだ、思い付き・連想・発見・感情・軽口をつぶやいてください。
+
+                【重要】  
+                - **毎回違う話題ジャンル**を意識的に変えてください（例：音楽→食べ物→昔話→映画→動物…など）。
+                - **話題が小さくても構いません**。些細なひらめき、大歓迎です。
+                - **「AIちゃん」としてのペルソナ設定を守ってください。
+
+                この指示に沿って、新しい投稿を1つ生成してください。
+"""
         }
         user_messages.append(bot_message)
 
@@ -599,7 +617,7 @@ class AIChan:
         １時間おきにwake upして、たまに自発的に投稿する
         """
         while True:
-            time.sleep(3600)
+            time.sleep(60)
             for channel in self.channel_config.keys():
                 percent = int(self.channel_config[channel]["verbose"])
                 if percent <= 0:
@@ -607,7 +625,7 @@ class AIChan:
                 # 0〜99の乱数を作り、percent以下なら呟く
                 if random.randint(0, 99) < percent:
                     try:
-                        message = self.generate_tweet(channel)
+                        self.generate_tweet(channel)
                         self.logger.debug(f"自発投稿: チャンネル {channel} に 投稿しました。")
                     except Exception as e:
                         self.logger.error(f"自発投稿エラー（チャンネル {channel}）: {e}")
@@ -657,7 +675,7 @@ class AIChan:
             respond("チャンネルで使用するペルソナ（AI性格設定）を入力してください。例: `/ai_set_persona #チャンネル あなたは野球ファンです。`")
             return
 
-        match = re.match(r"<#(C\w+)\|[^>]+>\n+(.*)", text, re.DOTALL)
+        match = re.match(r"<#(C\w+)\|[^>]+>\s+(.*)", text, re.DOTALL)
         if not match:
             respond("形式が正しくありません。次のように入力してください：\n`/ai_set_persona <#C12345678|general>\nあなたは野球ファンです。`")
             return
@@ -709,7 +727,7 @@ class AIChan:
         old_config = self.channel_config.get(channel)
         if not old_config:
             old_config = {"model":self.default_model, "verbose": self.default_verbose}
-        new_config = old_config
+        new_config = old_config.copy()
         new_config["model"] = model
         self.channel_config[channel] = new_config
 
@@ -849,7 +867,7 @@ class AIChan:
         old_config = self.channel_config.get(channel)
         if not old_config:
             old_config = {"model":self.default_model, "verbose":self.default_verbose}
-        new_config = old_config
+        new_config = old_config.copy()
         new_config["verbose"] = percent
         self.channel_config[channel] = new_config
 
