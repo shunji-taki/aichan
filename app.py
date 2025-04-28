@@ -18,18 +18,20 @@ import re
 import tiktoken
 import time
 import requests
+import threading
 
 _AICHAN_CONVERSATION_FILE = "conversation.db"
 _AICHAN_CONVERSATION_TABLE = "conversation_tbl"
 
 _AICHAN_SYSMEMORY_FILE = "sysmemory.db"
 _AICHAN_SYSMEMORY_TABLE = "sysmemory_tbl"
+_AICHAN_CHCONFIG_TABLE = "chconfig_tbl"
 _AICHAN_STATS_TABLE = "stats_tbl"
 
 class AIChan:
     def __init__(self, app):
         self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.INFO)
 
         if not self.logger.handlers:
             handler = logging.StreamHandler()
@@ -53,18 +55,35 @@ class AIChan:
             raise SystemExit(1)
 
         self.ai = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        self.model = "gpt-4.1-nano"
-                    
+
         self.initialize_sysmemory_file(builtin_system_prompt)
+        # デフォルトのsystem prompt
         self.sysmemory = []
         self.load_sysmemory()
+        # チャンネルごとのsystem prompt
+        self.channel_persona = {} # key=channel id, value=追加プロンプト
+        self.load_persona()
+
+        # チャンネルの設定
+        self.default_model = "gpt-4.1-nano"
+        self.default_verbose = 0
+        self.channel_config = {} # key=channelid, value={model:モデル, verbose:ツイート頻度}
+        self.load_channel_config()
 
         self.initialize_context_files()
 
         self.active_conversations = set()
+
+        self.model_prices = {}
+        self.model_prices["gpt-4.1"] = {"input_price":2, "cached_price":0.5, "output_price":8}
+        self.model_prices["gpt-4.1-mini"] = {"input_price":0.4, "cached_price":0.1, "output_price":1.6}
+        self.model_prices["gpt-4.1-nano"] = {"input_price":0.1, "cached_price":0.025, "output_price":0.4}
+
+        self.tweeter_thread = threading.Thread(target=self._tweeter_main)
+        self.tweeter_thread.start()
         
         self.logger.info(f"I'm ready.")
-                
+
     def initialize_sysmemory_file(self, system_prompt: str) -> None:
         try:
             with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as conn:
@@ -74,15 +93,31 @@ class AIChan:
                     CREATE TABLE IF NOT EXISTS {_AICHAN_SYSMEMORY_TABLE} (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         user TEXT,
-                        content TEXT
+                        channel TEXT,
+                        content TEXT,
+                        UNIQUE (channel)
                     )
                 """)
                 cur.execute(f"SELECT id FROM {_AICHAN_SYSMEMORY_TABLE} WHERE user = ? LIMIT 1", (self.boss_userid,))
                 record = cur.fetchone()
                 if not record:
                     cur.execute(f"""
-                        INSERT INTO {_AICHAN_SYSMEMORY_TABLE} (user, content) VALUES (?, ?)
-                        """, (self.boss_userid, system_prompt))
+                        INSERT INTO {_AICHAN_SYSMEMORY_TABLE} (user, channel, content) VALUES (?, ?, ?)
+                        """, (self.boss_userid, "base_prompt", system_prompt))
+                conn.commit()
+
+                # Channel Configuration
+                cur = conn.cursor()
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {_AICHAN_CHCONFIG_TABLE} (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user TEXT,
+                        channel TEXT,
+                        model TEXT,
+                        verbose INTEGER,
+                        UNIQUE (channel)
+                    )
+                """)
                 conn.commit()
                     
                 # Statistics table
@@ -91,7 +126,7 @@ class AIChan:
                     CREATE TABLE IF NOT EXISTS {_AICHAN_STATS_TABLE} (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         user TEXT,
-                        class TEXT,
+                        recordclass TEXT,
                         model TEXT,
                         systokens INTEGER,
                         usertokens INTEGER,
@@ -107,11 +142,12 @@ class AIChan:
             self.logger.error(f"Unexpected error: {e}")
 
     def load_sysmemory(self):
+        sqlite_conn = None
         try:
             sqlite_conn = sqlite3.connect(_AICHAN_SYSMEMORY_FILE)
             cur = sqlite_conn.cursor()            
             cur.execute(f"""
-                SELECT content FROM {_AICHAN_SYSMEMORY_TABLE} WHERE user = ? ORDER BY id
+                SELECT content FROM {_AICHAN_SYSMEMORY_TABLE} WHERE user = ? AND channel = "base_prompt" ORDER BY id
                 """, (self.boss_userid,))
             for record in cur.fetchall():
                 self.sysmemory.append(record[0])
@@ -122,6 +158,42 @@ class AIChan:
         finally:
             if sqlite_conn:
                 sqlite_conn.close()
+
+    def load_channel_config(self):
+        sqlite_conn = None
+        try:
+            with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as sqlite_conn:
+                cur = sqlite_conn.cursor()
+                cur.execute(f"""
+                    SELECT channel, model, verbose FROM {_AICHAN_CHCONFIG_TABLE} WHERE user = ?
+                """, (self.boss_userid,))
+                for channel, model, verbose in cur.fetchall():
+                    self.channel_config[channel] = {
+                        "model": model,
+                        "verbose": verbose
+                    }                
+                    self.logger.debug(f"load_channel_config : {channel} {model} {verbose}")
+        except Exception as e:
+            self.logger.error(f"load_channel_config Error : {e}")
+
+    def load_persona(self):
+        sqlite_conn = None
+        try:
+            sqlite_conn = sqlite3.connect(_AICHAN_SYSMEMORY_FILE)
+            cur = sqlite_conn.cursor()            
+            cur.execute(f"""
+                SELECT channel, content FROM {_AICHAN_SYSMEMORY_TABLE} WHERE user = ? AND channel != "base_prompt" ORDER BY id
+                """, (self.boss_userid,))
+            for record in cur.fetchall():
+                channel_id, content = record[0], record[1]
+                self.channel_persona[channel_id] = content
+                self.logger.debug(f"load_persona : {channel_id=} {self.channel_persona[channel_id]=}\n")
+        except Exception as e:
+            self.logger.error(f"Error : {e}")
+        finally:
+            if sqlite_conn:
+                sqlite_conn.close()
+
 
     def initialize_context_files(self):
         sqlite_conn = None  # ← 追加
@@ -153,7 +225,6 @@ class AIChan:
             # 接続が確立されている場合はクローズする
             if sqlite_conn:
                 sqlite_conn.close()
-
 
     def record_user_input(self, event):
         user = event["user"]
@@ -225,8 +296,11 @@ class AIChan:
             self.logger.error(f"Error recording response in record_ai_response: {e}")
 
     def num_tokens_from_messages(self, messages):
-#        model = self.model
-        model = "gpt-4" # 4.1はtiktokenが未対応
+        # tiktokenはgpt-4.1系に未対応。でも使ってるのは4.1系、-miniや-nanoも。当面、トークン数はgpt-4で代用する
+#        model = self.channel_config.get(model)
+#        if model == "gpt-4.1":
+#            model = self.default-model
+        model = self.default_model
         try:
             encoding = tiktoken.encoding_for_model(model)
         except KeyError:
@@ -245,29 +319,34 @@ class AIChan:
         num_tokens += 3  # Assistantの応答開始トークン
         return num_tokens
 
-    def record_ai_completion_stats(self, ctk_prompt, ctk_reply, ctk_cached) -> None:
+    def record_ai_completion_stats(self, ctk_prompt, ctk_reply, ctk_cached, channel) -> None:
         now = int(time.time())
+        conf = self.channel_config.get(channel)
+        if not conf or "model" not in conf:
+            model = self.default_model
+        else:
+            model = conf["model"]
         try:
             with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as conn:
                 cur = conn.cursor()
                 cur.execute(f"""
                     INSERT INTO {_AICHAN_STATS_TABLE} 
-                    (user, class, model, ctk_prompt, ctk_reply, ctk_cached, recorded_at)
+                    (user, recordclass, model, ctk_prompt, ctk_reply, ctk_cached, recorded_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (self.boss_userid, "comp", self.model, ctk_prompt, ctk_reply, ctk_cached, now))
+                """, (self.boss_userid, "comp", model, ctk_prompt, ctk_reply, ctk_cached, now))
         except Exception as e:
             self.logger.error(f"Error recording stats in record_ai_completion_stats: {e}")
 
-    def record_ai_input_stats(self, systokens, usertokens) -> None:
+    def record_ai_input_stats(self, systokens, usertokens, model) -> None:
         now = int(time.time())
         try:
             with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as conn:
                 cur = conn.cursor()
                 cur.execute(f"""
                     INSERT INTO {_AICHAN_STATS_TABLE} 
-                    (user, class, model, systokens, usertokens, recorded_at)
+                    (user, recordclass, model, systokens, usertokens, recorded_at)
                     VALUES (?, ?, ?, ?, ?, ?)
-                """, (self.boss_userid, "input", self.model, systokens, usertokens, now))
+                """, (self.boss_userid, "input", model, systokens, usertokens, now))
         except Exception as e:
             self.logger.error(f"Error recording stats in record_ai_input_stats: {e}")
 
@@ -286,9 +365,12 @@ class AIChan:
                 cur.execute(f"""
                     SELECT user, content FROM {_AICHAN_CONVERSATION_TABLE}
                     WHERE channel = ? AND (thread_ts = ? OR ts = ? OR ts = ?)
-                    ORDER BY id
+                    ORDER BY id DESC
+                    LIMIT 30
                 """, (channel, thread_ts, thread_ts, ts))
-                for r_userid, r_content in cur.fetchall():
+                rows = cur.fetchall()
+                rows.reverse()
+                for r_userid, r_content in rows:
                     message = {
                         "role": "assistant" if (r_userid == self.bot_userid) else "user",
                         "content": r_content,
@@ -301,11 +383,17 @@ class AIChan:
 
         return context
 
-    def prepare_channel_context(self, event: dict) -> list:
+    def prepare_channel_context(self, event: dict, target_channel=None) -> list:
         """
-        指定チャンネル最近の全履歴を取得し、AI用途に変換する。
+        指定チャンネル最近の履歴を最大30件取得し、AI用途に変換する。
         """
-        channel = event["channel"]
+        if event:
+            channel = event["channel"]
+        else: # 自発的投稿
+            if target_channel:
+                channel = target_channel
+            else:
+                return
         conversation_history = []
 
         try:
@@ -315,7 +403,7 @@ class AIChan:
             self.logger.error("Error in prepare_channel_context: {}".format(e), exc_info=True)
 
         context = []
-        for m in reversed(conversation_history):  # ← 時系列が古い順にしたい場合
+        for m in reversed(conversation_history):
             user = m.get("user")
             text = m.get("text", "")
             # userがないときはスキップ
@@ -338,22 +426,37 @@ class AIChan:
         """
         イベント（Slackメッセージ）に対しAIで応答し、Slackに返信・DB記録する
         """
-        ai_messages = [{"role": "system", "content": "\n".join(self.sysmemory)}]
+        channel_id = event.get("channel")
+
+        # チャンネルごとのペルソナを安全に取得（なければ空文字列）
+        persona = self.channel_persona.get(channel_id, "")
+
+        # 共通プロンプト + チャンネル用ペルソナを組み合わせ
+        system_prompt_list = self.sysmemory.copy()  # 念のため副作用回避
+        if persona:
+            system_prompt_list.append(persona)
+
+        ai_messages = [{"role": "system", "content": "\n".join(system_prompt_list)}]
 
         if in_thread:
             user_messages = self.prepare_thread_context(event)
         else:
             user_messages = self.prepare_channel_context(event)
 
-        # input tokens
+        # record input tokens
+        conf = self.channel_config.get(channel_id)
+        if not conf or "model" not in conf:
+            model = self.default_model
+        else:
+            model = conf["model"]
         systokens = self.num_tokens_from_messages(ai_messages)
         usertokens = self.num_tokens_from_messages(user_messages)
-        self.record_ai_input_stats(systokens, usertokens)
+        self.record_ai_input_stats(systokens, usertokens, model)
         
         ai_messages += user_messages
         try:
             response = self.ai.chat.completions.create(
-                model=self.model,
+                model=model,
                 messages=ai_messages
             )
             ai_response = response.choices[0].message.content
@@ -363,7 +466,7 @@ class AIChan:
             ctk_prompt = response.usage.prompt_tokens
             ctk_reply = response.usage.completion_tokens
             ctk_cached = response.usage.prompt_tokens_details.cached_tokens
-            self.record_ai_completion_stats(ctk_prompt, ctk_reply, ctk_cached)
+            self.record_ai_completion_stats(ctk_prompt, ctk_reply, ctk_cached, event["channel"])
             
             thread_ts = event.get("thread_ts")
             m = say(text=ai_response, thread_ts=thread_ts, channel=event["channel"])
@@ -382,6 +485,9 @@ class AIChan:
         if not self.is_recorded(event):
             self.record_user_input(event)
 
+        if event["user"] != self.boss_userid: #ボス以外には反応しない
+            return
+
         thread_ts = event.get("thread_ts")
         if thread_ts:
             if thread_ts not in self.active_conversations:
@@ -397,6 +503,9 @@ class AIChan:
         """
         if not self.is_recorded(event):
             self.record_user_input(event)
+
+        if event["user"] != self.boss_userid: #ボス以外には反応しない
+            return
 
         text = event.get("text", "")
         mention_pattern = f"<@{self.bot_userid}>"
@@ -420,13 +529,105 @@ class AIChan:
             if should_reply:
                 self.ai_respond(event, say, in_thread=False)
 
+    def generate_tweet(self, channel):
+        # 1. システムプロンプトを作る。
+        # チャンネルごとのペルソナを安全に取得（なければ空文字列）
+        persona = self.channel_persona.get(channel, "")
+        # 共通プロンプト + チャンネル用ペルソナを組み合わせ
+        system_prompt_list = self.sysmemory.copy()  # 念のため副作用回避
+        if persona:
+            system_prompt_list.append(persona)
+        # システムプロンプト
+        ai_messages = [{"role": "system", "content": "\n".join(system_prompt_list)}]
+
+        # 2. ユーザープロンプトを作る。
+        # チャンネルの履歴をとる
+        try:
+            result = self.app.client.conversations_history(channel=channel, limit=30)
+            conversation_history = result.get("messages", [])
+        except Exception as e:
+            self.logger.error("Error in prepare_channel_context: {}".format(e), exc_info=True)
+        user_messages = self.prepare_channel_context(event=None, target_channel=channel)
+        # botからの依頼
+        bot_message = {
+            "role": "user", 
+            "content":"""これは、あなたとユーザーの間に居るSlack botからの自動送信メッセージです。\n\n
+                あなたはこのチャンネルに自発的に投稿し、既存の文脈を離れて、別の新しい話題を開始することを求められています。\n\n 
+                投稿する内容を回答してください。\n\n 
+                あなたの回答には、「Slack botから要求されて投稿している」と言う事実を含めないでください。\n\n
+                あなたの回答は短い「つぶやき」の形をとることが望ましいです。ユーザーへの質問や依頼は望ましくありません。"""
+        }
+        user_messages.append(bot_message)
+
+        # record input tokens
+        systokens = self.num_tokens_from_messages(ai_messages)
+        usertokens = self.num_tokens_from_messages(user_messages)
+        # 料金計算用に渡すモデル名を取得する
+        conf = self.channel_config.get(channel)
+        if conf and conf["model"]:
+            model = conf["model"]
+        else:
+            model = self.default_model
+        self.record_ai_input_stats(systokens, usertokens, model)
+        
+        ai_messages += user_messages
+        try:
+            response = self.ai.chat.completions.create(
+                model=model,
+                messages=ai_messages
+            )
+            ai_response = response.choices[0].message.content
+            ai_response = self.markdown_to_slack(ai_response)
+            
+            # record completion tokens
+            ctk_prompt = response.usage.prompt_tokens
+            ctk_reply = response.usage.completion_tokens
+            ctk_cached = response.usage.prompt_tokens_details.cached_tokens
+            self.record_ai_completion_stats(ctk_prompt, ctk_reply, ctk_cached, channel)
+            
+            m = self.app.client.chat_postMessage(
+                channel=channel,
+                text=ai_response
+            )
+            self.record_ai_response(m)
+
+        except Exception as e:
+            self.logger.error(f"Error in ai_respond: {e}", exc_info=True)
+
+    def _tweeter_main(self):
+        """
+        １時間おきにwake upして、たまに自発的に投稿する
+        """
+        while True:
+            time.sleep(3600)
+            for channel in self.channel_config.keys():
+                percent = int(self.channel_config[channel]["verbose"])
+                if percent <= 0:
+                    continue
+                # 0〜99の乱数を作り、percent以下なら呟く
+                if random.randint(0, 99) < percent:
+                    try:
+                        message = self.generate_tweet(channel)
+                        self.logger.debug(f"自発投稿: チャンネル {channel} に 投稿しました。")
+                    except Exception as e:
+                        self.logger.error(f"自発投稿エラー（チャンネル {channel}）: {e}")
+                                            
+
+#############################
+# スラッシュコマンドのハンドラー
+#############################
+
     def cmd_replace_sysprompt(self, body, say, respond):
         user_id = body.get("user_id")
-        channel_id = body.get("channel_id")
+
+        if user_id != self.boss_userid:
+            respond("botのオーナーではありません。")
+            return
+
         text = body.get("text", "").strip()  # 新しいプロンプト内容
 
         if not text:
-            respond("新しいシステムプロンプトを入力してください。例: `/ai_replace_sysprompt あなたはPythonのプロです。`")
+            respond("ワークスペース全体で使用するシステムプロンプトを入力してください。例: `/ai_replace_sysprompt あなたはPythonのプロです。`")
             return
 
         try:
@@ -434,9 +635,9 @@ class AIChan:
                 cur = conn.cursor()
                 cur.execute(f"""
                     UPDATE {_AICHAN_SYSMEMORY_TABLE} 
-                    SET content = ?
+                    SET content = ?, channel = ?
                     WHERE user = ?
-                    """, (text, self.boss_userid))
+                    """, (text, "base_prompt", self.boss_userid))
 
             self.load_sysmemory()
 
@@ -445,60 +646,106 @@ class AIChan:
             self.logger.error(f"sysprompt更新エラー：{e}")
             respond("システムプロンプトの更新に失敗しました。")
 
-    def cmd_add_sysprompt(self, body, say, respond):
-        text = body.get("text", "").strip()  # 追加するプロンプト内容
-
-        if not text:
-            respond("追加するシステムプロンプトを入力してください。例: `/ai_add_sysprompt プロジェクトはテスト段階に移行した。`")
+    def cmd_set_persona(self, body, say, respond):
+        user_id = body.get("user_id")
+        if user_id != self.boss_userid:
+            respond("botのオーナーではありません。")
             return
 
-        additional_text ="\n\n(追記)\n\n" + text
+        text = body.get("text", "").strip()  # 
+        if not text:
+            respond("チャンネルで使用するペルソナ（AI性格設定）を入力してください。例: `/ai_set_persona #チャンネル あなたは野球ファンです。`")
+            return
+
+        match = re.match(r"<#(C\w+)\|[^>]+>\n+(.*)", text, re.DOTALL)
+        if not match:
+            respond("形式が正しくありません。次のように入力してください：\n`/ai_set_persona <#C12345678|general>\nあなたは野球ファンです。`")
+            return
+
+        channel_id = match.group(1)
+        persona_text = "\n\n" + match.group(2).strip()
 
         try:
             with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as conn:
                 cur = conn.cursor()
-                # 例: ユーザーごとに追記したい場合はUNIQUEキーなどに注意してください
                 cur.execute(f"""
-                    INSERT INTO {_AICHAN_SYSMEMORY_TABLE} (user, content)
-                    VALUES (?, ?)
-                    """, (self.boss_userid, additional_text))
+                    INSERT INTO {_AICHAN_SYSMEMORY_TABLE} (user, channel, content)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(channel) DO UPDATE SET
+                        user = excluded.user,
+                        content = excluded.content
+                """, (user_id, channel_id, persona_text))
+                conn.commit()
 
-            self.load_sysmemory()
+            self.channel_persona[channel_id] = persona_text
 
-            respond(f"【新しいシステムプロンプトを追加しました】\n{text}")
-        except sqlite3.IntegrityError:
-            respond("同じユーザーのシステムプロンプトは既に存在します。上書きの場合は `/ai_replace_sysprompt` をご利用ください。")
+            respond(f"【ペルソナを設定しました】\n{text}")
         except Exception as e:
-            self.logger.error(f"sysprompt追加エラー：{e}")
-            respond("システムプロンプトの追加に失敗しました。") 
+            self.logger.error(f"ペルソナ設定エラー：{e}")
+            respond("ペルソナ設定に失敗しました。") 
 
     def cmd_choose_model(self, body, say, respond):
-        # GPT-4.1|GPT-4.1-mini|4.1-nano|DALL-E-3
-        model = body.get("text", "").strip()
+        # <channel> GPT-4.1|GPT-4.1-mini|4.1-nano|DALL-E-3
+        user_id = body.get("user_id")
+        if user_id != self.boss_userid:
+            respond("botのオーナーではありません。")
+            return
 
-        if model == "gpt-4.1":
-            self.model = "gpt-4.1"
-        elif model == "gpt-4.1-mini":
-            self.model = "gpt-4.1-mini"
-        elif model == "gpt-4.1-nano":
-            self.model = "gpt-4.1-nano"
-        elif model == "dall-e-3":
-            self.model = "dall-e-3"
-        else:
+        text = body.get("text", "").strip()
+        if not text:
+            respond("このチャンネルで使用するチャンネルを入力してください。")
+            return
+
+        match = re.match(r"<#(C\w+)\|[^>]+>\s+(.*)", text, re.DOTALL)
+        if not match:
+            respond("形式が正しくありません。次のように入力してください：\n`/ai_model <#C12345678|general> モデル")
+            return
+        channel = match.group(1)
+        model = match.group(2).strip()
+        if model not in ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"]:
             respond("no such model")
             return
 
-        previous = self.model
-        self.model = model
-        respond(f"モデルを{previous}から{model}に変更しました")
+        old_config = self.channel_config.get(channel)
+        if not old_config:
+            old_config = {"model":self.default_model, "verbose": self.default_verbose}
+        new_config = old_config
+        new_config["model"] = model
+        self.channel_config[channel] = new_config
 
+        try:
+            with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as conn:
+                cur = conn.cursor()
+                cur.execute(f"""
+                    INSERT INTO {_AICHAN_CHCONFIG_TABLE} (user, channel, model)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(channel) DO UPDATE SET
+                        model = excluded.model
+                """, (user_id, channel, model))
+                conn.commit()
+            respond(f"モデルを{old_config['model']}から{model}に変更しました")
+        except Exception as e:
+            self.logger.error(f"モデル設定エラー：{e}")
+            respond("モデル設定に失敗しました。") 
 
     def cmd_token_stats(self, body, say, respond):
         """
         トークン数に関する統計を表示する
         """
-        def calc_fee(prompt, reply, cached):
-                return ((prompt - cached) * input_price) + (cached * cached_price) + (reply * output_price)
+        def calc_fee(model, prompt, reply, cached):
+            """
+            指定されたモデルでの費用を返す
+            """
+            if model not in ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"]:
+                model = self.default_model
+            prices = self.model_prices[model]
+
+            # self.model_prices記載の価格は1M Tokenあたりの単価なので、1 Tokenあたりに換算
+            input_price = prices["input_price"] / 1000000
+            cached_price = prices["cached_price"] / 1000000
+            output_price = prices["output_price"] / 1000000
+                    
+            return ((prompt - cached) * input_price) + (cached * cached_price) + (reply * output_price)
 
         def get_usd_to_jpy():
             try:
@@ -513,24 +760,6 @@ class AIChan:
             # 少数点以下6桁に固定
             s = f"{fee:.6f}"
             return s.rjust(12)  # 12桁幅で右寄せ
-
-        model = self.model
-        if model == "gpt-4.1":
-            input_price, cached_price, output_price = 2, 0.5, 8
-        elif model == "gpt-4.1-mini":
-            input_price, cached_price, output_price = 0.4, 0.1, 1.6
-        elif model == "gpt-4.1-nano":
-            input_price, cached_price, output_price = 0.1, 0.025, 0.4
-        elif model == "dall-e-3": #統計は未実装だけど。
-            price_1024, price_1792 = 0.04, 0.08
-        else:
-            respond(f"modelがおかしいゾ？ {model=}")
-            return
-
-        # 価格は1M Tokenあたりの単価なので、1 Tokenあたりに換算
-        input_price = input_price / 1000000
-        cached_price = cached_price / 1000000
-        output_price = output_price / 1000000
 
         # 円換算レート。デフォルトは140にしておく
         usd_to_jpy = get_usd_to_jpy() or 140
@@ -550,7 +779,7 @@ class AIChan:
                         ctk_cached,
                         datetime(recorded_at, 'unixepoch') AS recorded_at
                     FROM {_AICHAN_STATS_TABLE}
-                    WHERE user = ? AND class = ?
+                    WHERE user = ? AND recordclass = ?
                     ORDER BY recorded_at DESC
                 """, (self.boss_userid, "comp"))
 
@@ -573,14 +802,14 @@ class AIChan:
                 total_fee = 0
                 # 1. 古い順に並べた最新のレコードを表示
                 for model, prompt, reply, cached, recorded_at in latests_rev:
-                    fee = calc_fee(prompt, reply, cached)
+                    fee = calc_fee(model, prompt, reply, cached)
                     total_fee += fee
                     response.append(f"{recorded_at:<20} {model:<15} {prompt:>8} {reply:>8} {cached:>8} {format_usd(fee)}")
                 response.append("```")  # コードブロックを閉じる
 
                 # 2. それ以降のレコードは集計だけ
                 for model, prompt, reply, cached, recorded_at in rows[10:]:
-                    fee = calc_fee(prompt, reply, cached)
+                    fee = calc_fee(model, prompt, reply, cached)
                     total_fee += fee
 
                 # 合計金額
@@ -589,6 +818,55 @@ class AIChan:
         except Exception as e:
             print(f"DB error: {e}")
             respond("統計情報の取得に失敗しました")
+
+
+    def cmd_set_tweet_frequency(self, body, say, respond):
+        """
+        自発的に呟く動作を調整する
+        """
+        user_id = body.get("user_id")
+        if user_id != self.boss_userid:
+            respond("botのオーナーではありません。")
+            return
+
+        text = body.get("text", "").strip()
+        if not text:
+            respond("このチャンネルで自発的に投稿する頻度をパーセンテージ（0-100）で入力してください。100で毎分１回投稿します")
+            return
+
+        match = re.match(r"<#(C\w+)\|[^>]+>\s+(\d{1,3})", text)
+        if not match:
+            respond("形式が正しくありません。次のように入力してください：\n`/ai-verbose <#C12345678|general> [0-100]`")
+            return
+
+        channel = match.group(1)
+        percent = int(match.group(2))
+
+        if not (0 <= percent <= 100):
+            respond("パーセンテージは0〜100の範囲で指定してください。")
+            return
+
+        old_config = self.channel_config.get(channel)
+        if not old_config:
+            old_config = {"model":self.default_model, "verbose":self.default_verbose}
+        new_config = old_config
+        new_config["verbose"] = percent
+        self.channel_config[channel] = new_config
+
+        try:
+            with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as conn:
+                cur = conn.cursor()
+                cur.execute(f"""
+                    INSERT INTO {_AICHAN_CHCONFIG_TABLE} (user, channel, verbose)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(channel) DO UPDATE SET
+                        verbose = excluded.verbose
+                """, (user_id, channel, percent))
+                conn.commit()
+            respond(f"自発的投稿の頻度を{old_config['verbose']}から{percent}に変更しました")
+        except Exception as e:
+            self.logger.error(f"頻度設定エラー：{e}")
+            respond("頻度設定に失敗しました。") 
 
 
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
@@ -612,14 +890,14 @@ def handle_replace_sysprompt(ack, body, say, respond, logger):
 
     aichan.cmd_replace_sysprompt(body, say, respond)
 
-@app.command("/ai_add_sysprompt")
-def handle_add_sysprompt(ack, body, say, respond):
+@app.command("/ai_set_persona")
+def handle_set_persona(ack, body, say, respond):
     """
-    システムプロンプトを新規追加するスラッシュコマンド
-    使い方： /ai_add_sysprompt 新規プロンプト内容
+    チャンネル特有のAIペルソナを設定するスラッシュコマンド
+    使い方： /ai_set_persona channel=チャンネル名 性格設定テキスト
     """
     ack()
-    aichan.cmd_add_sysprompt(body, say, respond)
+    aichan.cmd_set_persona(body, say, respond)
 
 @app.command("/ai-model")
 def handle_model(ack, body, say, respond):
@@ -631,6 +909,12 @@ def handle_tokens(ack, body, say, respond):
     ack()
     aichan.cmd_token_stats(body, say, respond)
 
+@app.command("/ai-tweet")
+def handle_tweet(ack, body, say, respond):
+    ack()
+    aichan.cmd_set_tweet_frequency(body, say, respond)
+
+
 if __name__ == "__main__":
     handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-    handler.start()        
+    handler.start() 
