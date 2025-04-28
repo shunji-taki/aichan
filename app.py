@@ -19,6 +19,8 @@ import time
 import requests
 import threading
 
+load_dotenv()
+
 _AICHAN_CONVERSATION_FILE = "conversation.db"
 _AICHAN_CONVERSATION_TABLE = "conversation_tbl"
 
@@ -37,8 +39,6 @@ class AIChan:
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
-
-        load_dotenv()
 
         self.app = app
 
