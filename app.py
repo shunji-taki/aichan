@@ -15,6 +15,8 @@ from slack_bolt import App as SlackApp
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from openai import OpenAI
 import tiktoken
+from onetime_www import OneTimeWWW, BotConfigError
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -46,6 +48,11 @@ class AIChan:
             self.logger.addHandler(loghandler)
 
         self.slackapp = slack_app
+        try: 
+            self.onetime_www = OneTimeWWW()
+        except BotConfigError as e:
+            self.logger.error(e)
+            self.onetime_www = None
 
         try:
             self.bot_userid = self.slackapp.client.auth_test()["user_id"]
@@ -57,6 +64,8 @@ class AIChan:
         if len(self.boss_userid) < 8:
             self.logger.error("Couldn't get boss's slack userid - check .env for BOSS_SLACK_USERID")
             raise SystemExit(1)
+
+        self.bot_token = None
 
         self.ai = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
@@ -184,8 +193,7 @@ class AIChan:
                         "model": model,
                         "verbose": verbose
                     }                
-                    self.logger.debug("load_channel_config : channel=%s model=%s verbose=%s",
-                                      channel, model, verbose)
+                    self.logger.debug("load_channel_config : channel=%s model=%s verbose=%s", channel, model, verbose)
         except Exception as e: # pylint: disable=broad-exception-caught
             self.logger.error("load_channel_config Error : %s", e)
 
@@ -430,13 +438,57 @@ class AIChan:
 
         return context
 
+    def prepare_file_in_message(self,file: dict, say) -> str:
+        """ファイル付きのメッセージが投稿された。ファイルをAIに送る準備"""
+        if not self.onetime_www:
+            return
+        file_id = file["id"]
+
+        # 1) files.infoで詳細取得
+        fileinfo = self.get_slack_file_info(file_id, self.bot_token)
+        url_private = fileinfo["url_private"]
+#        filename = fileinfo["name"]
+
+        # 2) 画像ファイル本体をDL
+        file_content = self.onetime_www.download_slack_file(url_private, self.bot_token)
+
+        # 3) ファイルをtmpディレクトリに書き出し、ワンタイムURLを生成
+        onetime_url = self.onetime_www.generate_onetime_url(file_content)
+
+        return onetime_url
+
     def markdown_to_slack(self, text):
-        """APIからのmarkdownをslack書式に変更（不完全）"""
-        # bold
+        """OpenAI MarkdownをSlack形式に変換（コード部分を除く）"""
+        # コードブロック（```）を退避
+        code_blocks = []
+        def save_code_block(match):
+            code_blocks.append(match.group(0))
+            return f"[[[CODE_BLOCK_{len(code_blocks)-1}]]]"
+
+        text = re.sub(r"```[\s\S]*?```", save_code_block, text)
+
+        # インラインコード（`code`）を退避
+        inline_codes = []
+        def save_inline_code(match):
+            inline_codes.append(match.group(0))
+            return f"[[[INLINE_CODE_{len(inline_codes)-1}]]]"
+
+        text = re.sub(r"`[^`\n]+?`", save_inline_code, text)
+
+        # 太字：**bold** → *bold*
         text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", text)
-        # italic（**斜体はSlackでは " _ " で囲む。ただし UI では強調度が薄い)
+
+        # 斜体：*italic* → _italic_
         text = re.sub(r"\*(.*?)\*", r"_\1_", text)
-        # コードや箇条書きはごく一部しか移植できない
+
+        # インラインコードを復元
+        for i, code in enumerate(inline_codes):
+            text = text.replace(f"[[[INLINE_CODE_{i}]]]", code)
+
+        # コードブロックを復元
+        for i, code in enumerate(code_blocks):
+            text = text.replace(f"[[[CODE_BLOCK_{i}]]]", code)
+
         return text
 
     def ai_respond(self, event: dict, say, in_thread: bool) -> None:
@@ -460,6 +512,17 @@ class AIChan:
         else:
             user_messages = self.prepare_channel_context(event)
 
+        # 添付ファイル付き？
+        image_files = event.get("files", [])
+        image_url_contents = []
+        for file in image_files:
+            url = self.prepare_file_in_message(file, say) # OneTime URLが生成される
+            if url:
+                image_url_contents.append(
+                    {"type": "image_url", "image_url": {"url": url}}
+                )
+        user_messages += image_url_contents
+
         # record input tokens
         conf = self.channel_config.get(channel_id)
         if not conf or "model" not in conf:
@@ -469,7 +532,7 @@ class AIChan:
         systokens = self.num_tokens_from_messages(ai_messages)
         usertokens = self.num_tokens_from_messages(user_messages)
         self.record_ai_input_stats(systokens, usertokens, model)
-        
+
         ai_messages += user_messages
         try:
             response = self.ai.chat.completions.create(
@@ -478,13 +541,13 @@ class AIChan:
             )
             ai_response = response.choices[0].message.content
             ai_response = self.markdown_to_slack(ai_response)
-            
+
             # record completion tokens
             ctk_prompt = response.usage.prompt_tokens
             ctk_reply = response.usage.completion_tokens
             ctk_cached = response.usage.prompt_tokens_details.cached_tokens
             self.record_ai_completion_stats(ctk_prompt, ctk_reply, ctk_cached, event["channel"])
-            
+
             thread_ts = event.get("thread_ts")
             m = say(text=ai_response, thread_ts=thread_ts, channel=event["channel"])
             if m:
@@ -512,7 +575,6 @@ class AIChan:
             self.ai_respond(event, say, in_thread=True)
         else:
             self.ai_respond(event, say, in_thread=False)
-
 
     def event_message(self, event: dict, say):
         """
@@ -545,6 +607,26 @@ class AIChan:
             # botへのmentionを含まないときだけ、ときどき反応する
             if should_reply:
                 self.ai_respond(event, say, in_thread=False)
+
+    def get_slack_file_info(self, file_id, token):
+        """Slack APIからファイルの情報を取得する"""
+        url = "https://slack.com/api/files.info"
+        headers = {"Authorization": f"Bearer {token}"}
+        params = {"file": file_id}
+        r = requests.get(url, headers=headers, params=params)
+        r.raise_for_status()
+        data = r.json()
+        if not data.get("ok"):
+            raise Exception(f"Slack error: {data}")
+        # 主要フィールド抜粋
+        file_obj = data["file"]
+        return {
+            "url_private": file_obj["url_private"],
+            "filetype": file_obj["filetype"],
+            "name": file_obj["name"],
+            # 必要に応じ他も
+        }
+    
 
     def generate_tweet(self, channel):
         """自発的に投稿する"""
@@ -644,7 +726,6 @@ class AIChan:
                         self.logger.debug("自発投稿: チャンネル %s に 投稿しました。", channel)
                     except Exception as e: # pylint: disable=broad-exception-caught
                         self.logger.error("自発投稿エラー（チャンネル %s) : %s", channel, e)
-
 
 #############################
 # スラッシュコマンドのハンドラー
@@ -907,6 +988,7 @@ class AIChan:
 
 slackapp = SlackApp(token=os.environ["SLACK_BOT_TOKEN"])
 aichan = AIChan(slackapp)
+aichan.bot_token = os.environ["SLACK_BOT_TOKEN"]
 
 @slackapp.event("app_mention")
 def rx_app_mention(event, say):
@@ -917,6 +999,11 @@ def rx_app_mention(event, say):
 def rx_message(event, say):
     """messageイベントのハンドラー"""
     aichan.event_message(event, say)
+
+@slackapp.event("file_shared")
+def rx_file_shared(event, say):
+    """file_sharedのハンドラー。messageイベントで処理するので、ここでは何もしない"""
+    return
 
 @slackapp.command("/ai_replace_sysprompt")
 def handle_replace_sysprompt(ack, body, say, respond, logger):

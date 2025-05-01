@@ -1,4 +1,7 @@
 slack_bolt
 openai
 tiktoken
+fastapi
+uvicorn
+pillow
 python-dotenv
