@@ -1,23 +1,21 @@
-builtin_system_prompt = """
-1. あなたの役割と基本行動
-
-あなたは有能なアシスタントです。
-"""
-
+"""AIアシスタントボット「AIChan」の実装"""
 import os
-from dotenv import load_dotenv
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
-from openai import OpenAI
+import sys
 import sqlite3
 import logging
 import random
 from typing import Optional
 import re
-import tiktoken
 import time
-import requests
 import threading
+import signal
+
+import requests
+from slack_bolt import App as SlackApp
+from slack_bolt.adapter.socket_mode import SocketModeHandler
+from openai import OpenAI
+import tiktoken
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -29,33 +27,40 @@ _AICHAN_SYSMEMORY_TABLE = "sysmemory_tbl"
 _AICHAN_CHCONFIG_TABLE = "chconfig_tbl"
 _AICHAN_STATS_TABLE = "stats_tbl"
 
+_BUILTIN_SYSTEM_PROMPT = """
+1. あなたの役割と基本行動
+
+あなたは有能なアシスタントです。
+"""
+
 class AIChan:
-    def __init__(self, app):
+    """AIChanの実装"""
+    def __init__(self, slack_app):
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
 
         if not self.logger.handlers:
-            handler = logging.StreamHandler()
+            loghandler = logging.StreamHandler()
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
+            loghandler.setFormatter(formatter)
+            self.logger.addHandler(loghandler)
 
-        self.app = app
+        self.slackapp = slack_app
 
         try:
-            self.bot_userid = self.app.client.auth_test()["user_id"]
+            self.bot_userid = self.slackapp.client.auth_test()["user_id"]
         except Exception as e:
-            self.logger.error(f"Couldn't retrieve bot id: {e}")
-            raise SystemExit(1)
+            self.logger.error("Couldn't retrieve bot id: %s", e)
+            raise SystemExit(1) from e
         
         self.boss_userid = os.environ["BOSS_SLACK_USERID"]
         if len(self.boss_userid) < 8:
-            self.logger.error(f"Couldn't get boss's slack userid - check .env for BOSS_SLACK_USERID")
+            self.logger.error("Couldn't get boss's slack userid - check .env for BOSS_SLACK_USERID")
             raise SystemExit(1)
 
         self.ai = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
-        self.initialize_sysmemory_file(builtin_system_prompt)
+        self.initialize_sysmemory_file(_BUILTIN_SYSTEM_PROMPT)
         # デフォルトのsystem prompt
         self.sysmemory = []
         self.load_sysmemory()
@@ -78,12 +83,18 @@ class AIChan:
         self.model_prices["gpt-4.1-mini"] = {"input_price":0.4, "cached_price":0.1, "output_price":1.6}
         self.model_prices["gpt-4.1-nano"] = {"input_price":0.1, "cached_price":0.025, "output_price":0.4}
 
-        self.tweeter_thread = threading.Thread(target=self._tweeter_main)
-        self.tweeter_thread.start()
-        
-        self.logger.info(f"I'm ready.")
+        # サービススレッドの登録
+        self.stop_event = threading.Event()
+        self.threads = [
+            threading.Thread(target=self._tweeter_main),
+        ]
+        for thread in self.threads:
+            thread.start()
+
+        self.logger.info("I'm ready.")
 
     def initialize_sysmemory_file(self, system_prompt: str) -> None:
+        """sysmemory fileの初期化"""
         try:
             with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as conn:
                 # System Prompt
@@ -136,11 +147,12 @@ class AIChan:
                     )
                 """)
         except sqlite3.Error as e:
-            self.logger.error(f"SQLite error in initialize_sysmemory_file(): {e}")
-        except Exception as e:
-            self.logger.error(f"Unexpected error: {e}")
+            self.logger.error("SQLite error in initialize_sysmemory_file(): %s", e)
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Unexpected error: %s", e)
 
     def load_sysmemory(self):
+        """sysmemoryファイルを読み込む"""
         sqlite_conn = None
         try:
             sqlite_conn = sqlite3.connect(_AICHAN_SYSMEMORY_FILE)
@@ -151,14 +163,15 @@ class AIChan:
             for record in cur.fetchall():
                 self.sysmemory.append(record[0])
 
-            self.logger.debug(f"load_sysmemory : {self.sysmemory=}")
-        except Exception as e:
-            self.logger.error(f"Error : {e}")
+            self.logger.debug("load_sysmemory : self.sysmemory = %s", self.sysmemory)
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Error : %s", e)
         finally:
             if sqlite_conn:
                 sqlite_conn.close()
 
     def load_channel_config(self):
+        "channel configを読み込む"
         sqlite_conn = None
         try:
             with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as sqlite_conn:
@@ -171,11 +184,13 @@ class AIChan:
                         "model": model,
                         "verbose": verbose
                     }                
-                    self.logger.debug(f"load_channel_config : {channel} {model} {verbose}")
-        except Exception as e:
-            self.logger.error(f"load_channel_config Error : {e}")
+                    self.logger.debug("load_channel_config : channel=%s model=%s verbose=%s",
+                                      channel, model, verbose)
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("load_channel_config Error : %s", e)
 
     def load_persona(self):
+        """channelのペルソナを読み込む"""
         sqlite_conn = None
         try:
             sqlite_conn = sqlite3.connect(_AICHAN_SYSMEMORY_FILE)
@@ -187,14 +202,15 @@ class AIChan:
                 channel_id, content = record[0], record[1]
                 self.channel_persona[channel_id] = content
                 self.logger.debug(f"load_persona : {channel_id=} {self.channel_persona[channel_id]=}\n")
-        except Exception as e:
-            self.logger.error(f"Error : {e}")
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Error : %s", e)
         finally:
             if sqlite_conn:
                 sqlite_conn.close()
 
 
     def initialize_context_files(self):
+        """文脈ファイルを読み込む"""
         sqlite_conn = None  # ← 追加
         try:
             sqlite_conn = sqlite3.connect(_AICHAN_CONVERSATION_FILE)
@@ -214,18 +230,19 @@ class AIChan:
                 """)
             sqlite_conn.commit()
         except sqlite3.Error as e:
-            self.logger.error(f"SQLite error in initialize_context_files(): {e}")
+            self.logger.error("SQLite error in initialize_context_files(): %s", e)
             if sqlite_conn:
                 sqlite_conn.rollback()  # ロールバック
-        except Exception as e:
+        except Exception as e: # pylint: disable=broad-exception-caught
             # その他の予期しないエラーをキャッチ
-            self.logger.error(f"Unexpected error : {e}")
+            self.logger.error("Unexpected error : %s", e)
         finally:
             # 接続が確立されている場合はクローズする
             if sqlite_conn:
                 sqlite_conn.close()
 
     def record_user_input(self, event):
+        """ユーザ入力を記録する"""
         user = event["user"]
         text = event["text"]
         ts = event["ts"]
@@ -240,8 +257,8 @@ class AIChan:
                     ) VALUES (?, ?, ?, ?, ?)
                 """, (ts, thread_ts, channel, user, text,))
                 sqlite_conn.commit()
-        except Exception as e:
-            self.logger.error(f"Error : {e}")
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Error : %s", e)
 
     def is_recorded(self, event: dict) -> bool:
         """Slackイベントが既にDBに記録されているか判定する"""
@@ -254,9 +271,9 @@ class AIChan:
                 )
                 return cur.fetchone() is not None
         except sqlite3.Error as e:
-            self.logger.error(f"DB Error in is_recorded: {e}")
+            self.logger.error("DB Error in is_recorded: %s", e)
             return False
-        
+
     def user_by_ts(self, channel: str, ts: str) -> Optional[str]:
         """tsを持つレコードのユーザーIDを返す。なければNone"""
         try:
@@ -269,7 +286,7 @@ class AIChan:
                 row = cur.fetchone()
                 return row[0] if row else None
         except sqlite3.Error as e:
-            self.logger.error(f"DB Error in user_by_ts: {e}")
+            self.logger.error("DB Error in user_by_ts: %s", e)
             return None
 
     def record_ai_response(self, m: dict) -> None:
@@ -291,10 +308,11 @@ class AIChan:
                         ts, thread_ts, channel, user, content
                     ) VALUES (?, ?, ?, ?, ?)
                 """, (ts, thread_ts, channel, user, content))
-        except Exception as e:
-            self.logger.error(f"Error recording response in record_ai_response: {e}")
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Error recording response in record_ai_response: %s", e)
 
     def num_tokens_from_messages(self, messages):
+        """トークン数を返す"""
         # tiktokenはgpt-4.1系に未対応。でも使ってるのは4.1系、-miniや-nanoも。当面encoding取得はgpt-4と同等と想定する
         model = self.default_model
         try:
@@ -316,6 +334,7 @@ class AIChan:
         return num_tokens
 
     def record_ai_completion_stats(self, ctk_prompt, ctk_reply, ctk_cached, channel) -> None:
+        """AI応答のトークン数を記録する"""
         now = int(time.time())
         conf = self.channel_config.get(channel)
         if not conf or "model" not in conf:
@@ -330,10 +349,11 @@ class AIChan:
                     (user, recordclass, model, ctk_prompt, ctk_reply, ctk_cached, recorded_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (self.boss_userid, "comp", model, ctk_prompt, ctk_reply, ctk_cached, now))
-        except Exception as e:
-            self.logger.error(f"Error recording stats in record_ai_completion_stats: {e}")
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Error recording stats in record_ai_completion_stats: %s", e)
 
     def record_ai_input_stats(self, systokens, usertokens, model) -> None:
+        """AIに送るトークン数を記録する（参考記録。正確な数値はAI応答に含まれる）"""
         now = int(time.time())
         try:
             with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as conn:
@@ -343,8 +363,8 @@ class AIChan:
                     (user, recordclass, model, systokens, usertokens, recorded_at)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (self.boss_userid, "input", model, systokens, usertokens, now))
-        except Exception as e:
-            self.logger.error(f"Error recording stats in record_ai_input_stats: {e}")
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Error recording stats in record_ai_input_stats: %s", e)
 
     def prepare_thread_context(self, event: dict) -> list:
         """
@@ -373,9 +393,9 @@ class AIChan:
                     }
                     context.append(message)
         except sqlite3.Error as e:
-            self.logger.error(f"SQLite error in prepare_thread_context(): {e}")
-        except Exception as e:
-            self.logger.error(f"Unexpected error in prepare_thread_context(): {e}")
+            self.logger.error("SQLite error in prepare_thread_context(): %s", e)
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Unexpected error in prepare_thread_context(): %s", e)
 
         return context
 
@@ -393,10 +413,10 @@ class AIChan:
         conversation_history = []
 
         try:
-            result = self.app.client.conversations_history(channel=channel, limit=30)
+            result = self.slackapp.client.conversations_history(channel=channel, limit=30)
             conversation_history = result.get("messages", [])
-        except Exception as e:
-            self.logger.error("Error in prepare_channel_context: {}".format(e), exc_info=True)
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Error in prepare_channel_context: %s", e, exc_info=True)
 
         context = []
         for m in reversed(conversation_history):
@@ -411,6 +431,7 @@ class AIChan:
         return context
 
     def markdown_to_slack(self, text):
+        """APIからのmarkdownをslack書式に変更（不完全）"""
         # bold
         text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", text)
         # italic（**斜体はSlackでは " _ " で囲む。ただし UI では強調度が薄い)
@@ -470,8 +491,8 @@ class AIChan:
                 self.record_ai_response(m)
             else:
                 self.logger.error("Failed to send message via say(); ai_response was not recorded.")
-        except Exception as e:
-            self.logger.error(f"Error in ai_respond: {e}", exc_info=True)
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Error in ai_respond: %s", e, exc_info=True)
 
 
     def event_app_mention(self, event: dict, say):
@@ -506,7 +527,7 @@ class AIChan:
         text = event.get("text", "")
         mention_pattern = f"<@{self.bot_userid}>"
 
-        mention_event_may_raise = mention_pattern in event["text"]
+        mention_event_may_raise = mention_pattern in text
         should_reply = random.random() < 0.3 and not mention_event_may_raise
 
         thread_ts = event.get("thread_ts")
@@ -526,6 +547,7 @@ class AIChan:
                 self.ai_respond(event, say, in_thread=False)
 
     def generate_tweet(self, channel):
+        """自発的に投稿する"""
         # 1. システムプロンプトを作る。
         # チャンネルごとのペルソナを安全に取得（なければ空文字列）
         persona = self.channel_persona.get(channel, "")
@@ -537,14 +559,11 @@ class AIChan:
         ai_messages = [{"role": "system", "content": "\n".join(system_prompt_list)}]
 
         # 2. ユーザープロンプトを作る。
-        # チャンネルの履歴をとる
-        try:
-            result = self.app.client.conversations_history(channel=channel, limit=30)
-            conversation_history = result.get("messages", [])
-        except Exception as e:
-            self.logger.error("Error in prepare_channel_context: {}".format(e), exc_info=True)
+        # 文脈としてチャンネルの履歴をとる
         user_messages = self.prepare_channel_context(event=None, target_channel=channel)
-        # botからの依頼
+        
+        # botからの依頼を追加する
+        # #雑談チャンネルでの投稿を想定して、以下のプロンプトをハードコード。汎用性がないが、手抜きでゴー
         bot_message = {
             "role": "user", 
             "content":"""
@@ -583,7 +602,7 @@ class AIChan:
         else:
             model = self.default_model
         self.record_ai_input_stats(systokens, usertokens, model)
-        
+
         ai_messages += user_messages
         try:
             response = self.ai.chat.completions.create(
@@ -592,46 +611,47 @@ class AIChan:
             )
             ai_response = response.choices[0].message.content
             ai_response = self.markdown_to_slack(ai_response)
-            
+
             # record completion tokens
             ctk_prompt = response.usage.prompt_tokens
             ctk_reply = response.usage.completion_tokens
             ctk_cached = response.usage.prompt_tokens_details.cached_tokens
             self.record_ai_completion_stats(ctk_prompt, ctk_reply, ctk_cached, channel)
-            
-            m = self.app.client.chat_postMessage(
+
+            m = self.slackapp.client.chat_postMessage(
                 channel=channel,
                 text=ai_response
             )
             self.record_ai_response(m)
 
-        except Exception as e:
-            self.logger.error(f"Error in ai_respond: {e}", exc_info=True)
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Error in ai_respond: %s", e, exc_info=True)
 
     def _tweeter_main(self):
         """
         １時間おきにwake upして、たまに自発的に投稿する
         """
-        while True:
+        while not self.stop_event.is_set():
             time.sleep(3600)
-            for channel in self.channel_config.keys():
-                percent = int(self.channel_config[channel]["verbose"])
+            for channel, conf in self.channel_config.items():
+                percent = int(conf["verbose"])
                 if percent <= 0:
                     continue
                 # 0〜99の乱数を作り、percent以下なら呟く
                 if random.randint(0, 99) < percent:
                     try:
                         self.generate_tweet(channel)
-                        self.logger.debug(f"自発投稿: チャンネル {channel} に 投稿しました。")
-                    except Exception as e:
-                        self.logger.error(f"自発投稿エラー（チャンネル {channel}）: {e}")
-                                            
+                        self.logger.debug("自発投稿: チャンネル %s に 投稿しました。", channel)
+                    except Exception as e: # pylint: disable=broad-exception-caught
+                        self.logger.error("自発投稿エラー（チャンネル %s) : %s", channel, e)
+
 
 #############################
 # スラッシュコマンドのハンドラー
 #############################
 
     def cmd_replace_sysprompt(self, body, say, respond):
+        """スラッシュコマンドの実装"""
         user_id = body.get("user_id")
 
         if user_id != self.boss_userid:
@@ -656,17 +676,18 @@ class AIChan:
             self.load_sysmemory()
 
             respond(f"【システムプロンプトを更新しました】\n{text}")
-        except Exception as e:
-            self.logger.error(f"sysprompt更新エラー：{e}")
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("sysprompt更新エラー：%s", e)
             respond("システムプロンプトの更新に失敗しました。")
 
     def cmd_set_persona(self, body, say, respond):
+        """スラッシュコマンドの実装"""
         user_id = body.get("user_id")
         if user_id != self.boss_userid:
             respond("botのオーナーではありません。")
             return
 
-        text = body.get("text", "").strip()  # 
+        text = body.get("text", "").strip()
         if not text:
             respond("チャンネルで使用するペルソナ（AI性格設定）を入力してください。例: `/ai_set_persona #チャンネル あなたは野球ファンです。`")
             return
@@ -694,11 +715,12 @@ class AIChan:
             self.channel_persona[channel_id] = persona_text
 
             respond(f"【ペルソナを設定しました】\n{text}")
-        except Exception as e:
-            self.logger.error(f"ペルソナ設定エラー：{e}")
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("ペルソナ設定エラー：%s", e)
             respond("ペルソナ設定に失敗しました。") 
 
     def cmd_choose_model(self, body, say, respond):
+        """スラッシュコマンドの実装"""
         # <channel> GPT-4.1|GPT-4.1-mini|4.1-nano|DALL-E-3
         user_id = body.get("user_id")
         if user_id != self.boss_userid:
@@ -738,12 +760,12 @@ class AIChan:
                 """, (user_id, channel, model))
                 conn.commit()
             respond(f"モデルを{old_config['model']}から{model}に変更しました")
-        except Exception as e:
-            self.logger.error(f"モデル設定エラー：{e}")
-            respond("モデル設定に失敗しました。") 
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("モデル設定エラー：%s", e)
+            respond("モデル設定に失敗しました。")
 
     def cmd_token_stats(self, body, say, respond):
-        """
+        """スラッシュコマンドの実装
         トークン数に関する統計を表示する
         """
         def calc_fee(model, prompt, reply, cached):
@@ -758,7 +780,7 @@ class AIChan:
             input_price = prices["input_price"] / 1000000
             cached_price = prices["cached_price"] / 1000000
             output_price = prices["output_price"] / 1000000
-                    
+
             return ((prompt - cached) * input_price) + (cached * cached_price) + (reply * output_price)
 
         def get_usd_to_jpy():
@@ -767,7 +789,8 @@ class AIChan:
                 response = requests.get(url)
                 data = response.json()
                 return data["rates"]["JPY"]
-            except Exception as e:
+            except Exception as e: # pylint: disable=broad-exception-caught
+                self.logger.error("ドル円換算レート取得失敗：%s", e)
                 return None
 
         def format_usd(fee):
@@ -808,7 +831,6 @@ class AIChan:
 
                 total_fee = 0
                 fee = 0
-                num = 0
 
                 latests = rows[:limit]            # 直近10件（新しい順）
                 latests_rev = list(reversed(latests))  # 古い順に並び替え（表示用）
@@ -829,8 +851,8 @@ class AIChan:
                 # 合計金額
                 response.append(f"\nAccumulated Fee : USD {total_fee:.2f} (JPY {total_fee * usd_to_jpy:,.0f}円@{usd_to_jpy}) since {rows[-1][4]}")
                 respond("\n".join(response))
-        except Exception as e:
-            print(f"DB error: {e}")
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("統計取得エラー：%s", e)
             respond("統計情報の取得に失敗しました")
 
 
@@ -856,7 +878,7 @@ class AIChan:
         channel = match.group(1)
         percent = int(match.group(2))
 
-        if not (0 <= percent <= 100):
+        if not 0 <= percent <= 100:
             respond("パーセンテージは0〜100の範囲で指定してください。")
             return
 
@@ -878,23 +900,25 @@ class AIChan:
                 """, (user_id, channel, percent))
                 conn.commit()
             respond(f"自発的投稿の頻度を{old_config['verbose']}から{percent}に変更しました")
-        except Exception as e:
-            self.logger.error(f"頻度設定エラー：{e}")
-            respond("頻度設定に失敗しました。") 
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("頻度設定エラー：%s", e)
+            respond("頻度設定に失敗しました。")
 
 
-app = App(token=os.environ["SLACK_BOT_TOKEN"])
-aichan = AIChan(app)
+slackapp = SlackApp(token=os.environ["SLACK_BOT_TOKEN"])
+aichan = AIChan(slackapp)
 
-@app.event("app_mention")
+@slackapp.event("app_mention")
 def rx_app_mention(event, say):
+    """mentionイベントのハンドラー"""
     aichan.event_app_mention(event, say)
 
-@app.event("message")
+@slackapp.event("message")
 def rx_message(event, say):
+    """messageイベントのハンドラー"""
     aichan.event_message(event, say)
 
-@app.command("/ai_replace_sysprompt")
+@slackapp.command("/ai_replace_sysprompt")
 def handle_replace_sysprompt(ack, body, say, respond, logger):
     """
     システムプロンプトを新しい内容に置き換えるスラッシュコマンド
@@ -904,7 +928,7 @@ def handle_replace_sysprompt(ack, body, say, respond, logger):
 
     aichan.cmd_replace_sysprompt(body, say, respond)
 
-@app.command("/ai_set_persona")
+@slackapp.command("/ai_set_persona")
 def handle_set_persona(ack, body, say, respond):
     """
     チャンネル特有のAIペルソナを設定するスラッシュコマンド
@@ -913,22 +937,42 @@ def handle_set_persona(ack, body, say, respond):
     ack()
     aichan.cmd_set_persona(body, say, respond)
 
-@app.command("/ai-model")
+@slackapp.command("/ai-model")
 def handle_model(ack, body, say, respond):
+    """スラッシュコマンド"""
     ack()
     aichan.cmd_choose_model(body, say, respond)
 
-@app.command("/ai-tokens")
+@slackapp.command("/ai-tokens")
 def handle_tokens(ack, body, say, respond):
+    """スラッシュコマンド"""
     ack()
     aichan.cmd_token_stats(body, say, respond)
 
-@app.command("/ai-tweet")
+@slackapp.command("/ai-tweet")
 def handle_tweet(ack, body, say, respond):
+    """スラッシュコマンド"""
     ack()
     aichan.cmd_set_tweet_frequency(body, say, respond)
 
+def graceful_shutdown(signal, frame):
+    """プロセス終了処理"""
+    try:
+        print("Shutting down gracefully...")
+        aichan.stop_event.set()
+
+        for thread in aichan.threads:
+            thread.join(10)  # AI/API処理中の可能性があるので少し待つ
+            if thread.is_alive():
+                aichan.logger.warning("Thread %s did not terminate within 10 seconds.", thread.name)
+    except Exception as e: # pylint: disable=broad-exception-caught
+        aichan.logger.error("Error during shutdown: %s", e)
+    finally:
+        sys.exit(0)
 
 if __name__ == "__main__":
-    handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-    handler.start() 
+    signal.signal(signal.SIGINT, graceful_shutdown)
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+
+    handler = SocketModeHandler(slackapp, os.environ["SLACK_APP_TOKEN"])
+    handler.start()
