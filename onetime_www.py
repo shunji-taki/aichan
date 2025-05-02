@@ -1,3 +1,4 @@
+"""OpenAIに画像ファイルを引き渡すWebサーバーの実装"""
 import os
 import logging
 from io import BytesIO
@@ -52,7 +53,7 @@ class OneTimeWWW:
 
         content_type = response.headers.get("Content-Type", "")
         if not content_type.startswith("image/"):
-            raise ImageFormatError("botが対応していないContent_Type : %s", content_type)
+            raise ImageFormatError(f"botが対応していないContent_Type : {content_type}")
     
         return response.content
 

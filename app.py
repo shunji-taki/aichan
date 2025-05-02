@@ -619,7 +619,7 @@ class AIChan:
         url = "https://slack.com/api/files.info"
         headers = {"Authorization": f"Bearer {token}"}
         params = {"file": file_id}
-        r = requests.get(url, headers=headers, params=params)
+        r = requests.get(url, headers=headers, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
         if not data.get("ok"):
@@ -873,7 +873,7 @@ class AIChan:
         def get_usd_to_jpy():
             try:
                 url = "https://api.frankfurter.app/latest?from=USD&to=JPY"
-                response = requests.get(url)
+                response = requests.get(url, timeout=10)
                 data = response.json()
                 return data["rates"]["JPY"]
             except Exception as e: # pylint: disable=broad-exception-caught
