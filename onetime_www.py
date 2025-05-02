@@ -5,7 +5,7 @@ from io import BytesIO
 
 import requests
 from fastapi import FastAPI, APIRouter, Response
-import uvicorn
+from uvicorn import Config, Server
 import uuid, os
 from PIL import Image
 
@@ -44,6 +44,9 @@ class OneTimeWWW:
 
         self.webapp = FastAPI()
         self.webapp.include_router(self.router)
+        
+        config = Config(self.webapp, host="0.0.0.0", port=8000, log_level="info")
+        self.uvicorn_server = Server(config)
 
     def download_slack_file(self, url_private, token):
         """Slack APIからファイルをダウンロード"""
@@ -93,6 +96,5 @@ class OneTimeWWW:
         return f"https://{self.fileurl}/img-once/{img_id}"
 
     def web_server(self):
-        """ Web Server"""
-        uvicorn.run(self.webapp, host="0.0.0.0", port=8000)
-        
+        """非ブロッキングなUvicornサーバーの起動"""
+        self.uvicorn_server.run()

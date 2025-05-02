@@ -95,8 +95,8 @@ class AIChan:
         # サービススレッドの登録
         self.stop_event = threading.Event()
         self.threads = [
-            threading.Thread(target=self._tweeter_main),
-            threading.Thread(target=self.onetime_www.web_server)
+            threading.Thread(target=self._tweeter_main, name="tweeter"),
+            threading.Thread(target=self.onetime_www.web_server, name="web_server")
         ]
         for thread in self.threads:
             thread.start()
@@ -719,8 +719,14 @@ class AIChan:
         """
         １時間おきにwake upして、たまに自発的に投稿する
         """
+        wakeup_interval = 3600 #seconds
+        sleep_duration = 0
         while not self.stop_event.is_set():
-            time.sleep(3600)
+            time.sleep(1)
+            sleep_duration += 1
+            if sleep_duration < wakeup_interval:
+                continue
+            sleep_duration = 0
             for channel, conf in self.channel_config.items():
                 percent = int(conf["verbose"])
                 if percent <= 0:
@@ -1054,6 +1060,10 @@ if __name__ == "__main__":
         """プロセス終了処理"""
         print("\n[INFO] Shutting down gracefully...")
         aichan.stop_event.set()
+
+        if hasattr(aichan.onetime_www, "uvicorn_server"):
+            aichan.onetime_www.uvicorn_server.should_exit = True
+
         for thread in aichan.threads:
             thread.join(10)
             if thread.is_alive():
