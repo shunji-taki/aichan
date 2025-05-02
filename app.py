@@ -96,6 +96,7 @@ class AIChan:
         self.stop_event = threading.Event()
         self.threads = [
             threading.Thread(target=self._tweeter_main),
+            threading.Thread(target=self.onetime_www.web_server)
         ]
         for thread in self.threads:
             thread.start()
@@ -444,18 +445,21 @@ class AIChan:
             return
         file_id = file["id"]
 
-        # 1) files.infoで詳細取得
-        fileinfo = self.get_slack_file_info(file_id, self.bot_token)
-        url_private = fileinfo["url_private"]
-#        filename = fileinfo["name"]
+        try:
+            # 1) files.infoで詳細取得
+            fileinfo = self.get_slack_file_info(file_id, self.bot_token)
+            url_private = fileinfo["url_private"]
 
-        # 2) 画像ファイル本体をDL
-        file_content = self.onetime_www.download_slack_file(url_private, self.bot_token)
+            # 2) 画像ファイル本体をDL
+            file_content = self.onetime_www.download_slack_file(url_private, self.bot_token)
 
-        # 3) ファイルをtmpディレクトリに書き出し、ワンタイムURLを生成
-        onetime_url = self.onetime_www.generate_onetime_url(file_content)
+            # 3) ファイルをtmpディレクトリに書き出し、ワンタイムURLを生成
+            onetime_url = self.onetime_www.generate_onetime_url(file_content)
 
-        return onetime_url
+            return onetime_url
+        except Exception as e: # pylint: disable=broad-exception-caught
+            self.logger.error("Error in prepare_file_in_message: %s", e, exc_info=True)
+            return None
 
     def markdown_to_slack(self, text):
         """OpenAI MarkdownをSlack形式に変換（コード部分を除く）"""
@@ -518,10 +522,7 @@ class AIChan:
         for file in image_files:
             url = self.prepare_file_in_message(file, say) # OneTime URLが生成される
             if url:
-                image_url_contents.append(
-                    {"type": "image_url", "image_url": {"url": url}}
-                )
-        user_messages += image_url_contents
+                image_url_contents.append({"type": "image_url", "image_url": {"url": url}})
 
         # record input tokens
         conf = self.channel_config.get(channel_id)
@@ -532,6 +533,11 @@ class AIChan:
         systokens = self.num_tokens_from_messages(ai_messages)
         usertokens = self.num_tokens_from_messages(user_messages)
         self.record_ai_input_stats(systokens, usertokens, model)
+
+        if image_url_contents:
+            this_message = user_messages[-1]
+            text_part = this_message["content"]
+            this_message["content"] = [{"type":"text", "text": text_part}, *image_url_contents]
 
         ai_messages += user_messages
         try:

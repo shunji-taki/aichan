@@ -2,3 +2,4 @@
 SystemPrompt.txt
 .env
 .venv/*
+venv/*

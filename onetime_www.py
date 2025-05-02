@@ -3,7 +3,8 @@ import logging
 from io import BytesIO
 
 import requests
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, APIRouter, Response
+import uvicorn
 import uuid, os
 from PIL import Image
 
@@ -13,6 +14,9 @@ load_dotenv()
 
 class BotConfigError(Exception):
     """OneTimeWWWが送出するコンフィグ関連の例外"""
+
+class ImageFormatError(Exception):
+    """OneTimeWWWが送出するイメージファイルの例外"""
 
 class OneTimeWWW:
     """OpenAI FileAPIにファイルを渡す実装"""
@@ -34,14 +38,25 @@ class OneTimeWWW:
         if not self.fileurl:
             raise BotConfigError("環境変数BOT_FILESERVER_BASEURLを取得できません")
 
+        self.router = APIRouter()
+        self.router.get("/img-once/{img_id}")(self.serve_once)
+
+        self.webapp = FastAPI()
+        self.webapp.include_router(self.router)
+
     def download_slack_file(self, url_private, token):
         """Slack APIからファイルをダウンロード"""
         headers = {'Authorization': f'Bearer {token}'}
         response = requests.get(url_private, headers=headers, timeout=10)
         response.raise_for_status()
+
+        content_type = response.headers.get("Content-Type", "")
+        if not content_type.startswith("image/"):
+            raise ImageFormatError("botが対応していないContent_Type : %s", content_type)
+    
         return response.content
 
-    def process_image(self, src_bytes, max_size=2000):
+    def process_image(self, src_bytes, max_size=1024):
         """画像ファイルの圧縮"""
         im = Image.open(BytesIO(src_bytes))
         im = im.convert("RGB")
@@ -51,7 +66,7 @@ class OneTimeWWW:
             newsize = (int(im.size[0]*ratio), int(im.size[1]*ratio))
             im = im.resize(newsize)
         buf = BytesIO()
-        im.save(buf, format="JPEG", quality=85)  # 必要に応じてPNGも可
+        im.save(buf, format="PNG", quality=85)  # 必要に応じてPNGも可
         return buf.getvalue()
 
     def serve_once(self, img_id: str):
@@ -67,17 +82,16 @@ class OneTimeWWW:
 
     def generate_onetime_url(self, image_bytes: bytes) -> str:
         """ワンタイムURLを生成"""
+        content = self.process_image(image_bytes)
         img_id = str(uuid.uuid4())
-        fname = os.path.join(self.tmp_dir, f"{img_id}.png")
+        img_id += ".png"
+        fname = os.path.join(self.tmp_dir, f"{img_id}")
         with open(fname, "wb") as f:
-            f.write(image_bytes)
+            f.write(content)
         self.img_db[img_id] = fname
-        return f"http://{self.fileurl}/img-once/{img_id}"
+        return f"https://{self.fileurl}/img-once/{img_id}"
 
-webapp = FastAPI()
-onetime_www = OneTimeWWW()
-
-@webapp.get("/img-once/{img_id}")
-def get_called(img_id: str):
-    """get処理"""
-    return onetime_www.serve_once(img_id)
+    def web_server(self):
+        """ Web Server"""
+        uvicorn.run(self.webapp, host="0.0.0.0", port=8000)
+        
