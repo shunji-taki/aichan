@@ -15,6 +15,7 @@ from slack_bolt import App as SlackApp
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from openai import OpenAI
 import tiktoken
+import commonmarkslack, commonmark
 from onetime_www import OneTimeWWW, BotConfigError
 
 from dotenv import load_dotenv
@@ -84,6 +85,10 @@ class AIChan:
         self.load_channel_config()
 
         self.initialize_context_files()
+
+        # Markdown書式変換
+        self.parser = commonmarkslack.Parser()
+        self.renderer = commonmarkslack.SlackRenderer()
 
         self.active_conversations = set()
 
@@ -461,40 +466,6 @@ class AIChan:
             self.logger.error("Error in prepare_file_in_message: %s", e, exc_info=True)
             return None
 
-    def markdown_to_slack(self, text):
-        """OpenAI MarkdownをSlack形式に変換（コード部分を除く）"""
-        # コードブロック（```）を退避
-        code_blocks = []
-        def save_code_block(match):
-            code_blocks.append(match.group(0))
-            return f"[[[CODE_BLOCK_{len(code_blocks)-1}]]]"
-
-        text = re.sub(r"```[\s\S]*?```", save_code_block, text)
-
-        # インラインコード（`code`）を退避
-        inline_codes = []
-        def save_inline_code(match):
-            inline_codes.append(match.group(0))
-            return f"[[[INLINE_CODE_{len(inline_codes)-1}]]]"
-
-        text = re.sub(r"`[^`\n]+?`", save_inline_code, text)
-
-        # 太字：**bold** → *bold*
-        text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", text)
-
-        # 斜体：*italic* → _italic_
-        text = re.sub(r"\*(.*?)\*", r"_\1_", text)
-
-        # インラインコードを復元
-        for i, code in enumerate(inline_codes):
-            text = text.replace(f"[[[INLINE_CODE_{i}]]]", code)
-
-        # コードブロックを復元
-        for i, code in enumerate(code_blocks):
-            text = text.replace(f"[[[CODE_BLOCK_{i}]]]", code)
-
-        return text
-
     def ai_respond(self, event: dict, say, in_thread: bool) -> None:
         """
         イベント（Slackメッセージ）に対しAIで応答し、Slackに返信・DB記録する
@@ -546,7 +517,8 @@ class AIChan:
                 messages=ai_messages
             )
             ai_response = response.choices[0].message.content
-            ai_response = self.markdown_to_slack(ai_response)
+            ast = self.parser.parse(ai_response)
+            ai_response = self.renderer.render(ast)
 
             # record completion tokens
             ctk_prompt = response.usage.prompt_tokens
@@ -555,7 +527,12 @@ class AIChan:
             self.record_ai_completion_stats(ctk_prompt, ctk_reply, ctk_cached, event["channel"])
 
             thread_ts = event.get("thread_ts")
-            m = say(text=ai_response, thread_ts=thread_ts, channel=event["channel"])
+            m = self.slackapp.client.chat_postMessage(
+                channel=event["channel"],
+                thread_ts=thread_ts,
+                text=ai_response,
+                mrkdwn=True
+            )
             if m:
                 self.record_ai_response(m)
             else:
