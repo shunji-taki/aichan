@@ -1048,24 +1048,30 @@ def handle_tweet(ack, body, say, respond):
     ack()
     aichan.cmd_set_tweet_frequency(body, say, respond)
 
-def graceful_shutdown(signal, frame):
-    """プロセス終了処理"""
-    try:
-        print("Shutting down gracefully...")
+if __name__ == "__main__":
+    # Signalハンドラの定義
+    def graceful_shutdown(signum, frame):
+        """プロセス終了処理"""
+        print("\n[INFO] Shutting down gracefully...")
         aichan.stop_event.set()
-
         for thread in aichan.threads:
-            thread.join(10)  # AI/API処理中の可能性があるので少し待つ
+            thread.join(10)
             if thread.is_alive():
-                aichan.logger.warning("Thread %s did not terminate within 10 seconds.", thread.name)
-    except Exception as e: # pylint: disable=broad-exception-caught
-        aichan.logger.error("Error during shutdown: %s", e)
-    finally:
+                aichan.logger.warning("Thread %s did not terminate in time.", thread.name)
         sys.exit(0)
 
-if __name__ == "__main__":
+    # シグナルハンドラ登録
     signal.signal(signal.SIGINT, graceful_shutdown)
     signal.signal(signal.SIGTERM, graceful_shutdown)
 
+    # SocketModeHandler を別スレッドで起動
     handler = SocketModeHandler(slackapp, os.environ["SLACK_APP_TOKEN"])
-    handler.start()
+    socket_thread = threading.Thread(target=handler.start, name="SlackSocketThread")
+    socket_thread.start()
+
+    # メインスレッドは待機
+    try:
+        while not aichan.stop_event.is_set():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        graceful_shutdown(signal.SIGINT, None)
