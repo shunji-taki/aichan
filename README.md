@@ -4,10 +4,11 @@ Slack 上で OpenAI API を活用する、会話型 AI ボットです。
 
 会話履歴やシステムプロンプトの記録、統計管理、スレッドごとの文脈保持などを特徴としています。
 
-Slack Bolt + OpenAI + SQLite3 によるシンプルかつ柔軟な構成です。
+Slack Bolt + OpenAI + SQLite3 + FastAPIによるシンプルかつ柔軟な構成です。
 
 ## 構成ファイル
 - app.py : メインアプリケーション。Slackイベントやコマンド処理のロジックを含みます。
+- onetime_www.py : OpenAIに画像ファイルを渡す処理の実装
 - requirements.txt : 必要な Python パッケージ一覧。
 
 ## 主な機能
@@ -16,6 +17,7 @@ Slack Bolt + OpenAI + SQLite3 によるシンプルかつ柔軟な構成です�
 - Slackチャンネルごとのシステムプロンプト（スラッシュコマンドで設定可能）
 - SQLite による会話履歴と統計の保存
 - メンションやスレッド内での応答、時々発話機能
+- URL引き渡しによる画像ファイルのAI入力（画像生成には未対応）
 - トークン使用量と想定コストを表示（USD/JPY換算）
 
 ## セットアップ方法
@@ -41,6 +43,7 @@ SLACK_BOT_TOKEN=（Slack Bot Token）
 SLACK_APP_TOKEN=（Socket Mode Token）
 OPENAI_API_KEY=（OpenAI API Key）
 BOSS_SLACK_USERID=（オーナーのSlack User ID）
+BOT_FILESERVER_BASEURL=（OpenAIから到達可能なURL。https必須）
 ```
 
 4.	アプリ起動
@@ -60,11 +63,16 @@ python app.py
 - conversation.db : 会話ログの記録
 - sysmemory.db    : システムプロンプトやトークン統計の保存
 
+## 画像ファイル置き場
+- /tmp/image_files/*
+
 ## 依存ライブラリ（抜粋）
 - slack-bolt
 - openai
 - python-dotenv
 - tiktoken
+- fastapi + uvicorn
+- pillow
 
 ## ライセンス
 
