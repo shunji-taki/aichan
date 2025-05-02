@@ -94,11 +94,11 @@ class AIChan:
 
         # サービススレッドの登録
         self.stop_event = threading.Event()
-        self.threads = [
+        self.service_threads = [
             threading.Thread(target=self._tweeter_main, name="tweeter"),
             threading.Thread(target=self.onetime_www.web_server, name="web_server")
         ]
-        for thread in self.threads:
+        for thread in self.service_threads:
             thread.start()
 
         self.logger.info("I'm ready.")
@@ -738,6 +738,8 @@ class AIChan:
                         self.logger.debug("自発投稿: チャンネル %s に 投稿しました。", channel)
                     except Exception as e: # pylint: disable=broad-exception-caught
                         self.logger.error("自発投稿エラー（チャンネル %s) : %s", channel, e)
+        # 終了
+        self.logger.info("Tweeter thread exited.")
 
 #############################
 # スラッシュコマンドのハンドラー
@@ -1064,24 +1066,20 @@ if __name__ == "__main__":
         if hasattr(aichan.onetime_www, "uvicorn_server"):
             aichan.onetime_www.uvicorn_server.should_exit = True
 
-        for thread in aichan.threads:
+        for thread in aichan.service_threads:
             thread.join(10)
             if thread.is_alive():
                 aichan.logger.warning("Thread %s did not terminate in time.", thread.name)
+
         sys.exit(0)
+
+    handler = SocketModeHandler(slackapp, os.environ["SLACK_APP_TOKEN"])
+    handler.connect()
 
     # シグナルハンドラ登録
     signal.signal(signal.SIGINT, graceful_shutdown)
     signal.signal(signal.SIGTERM, graceful_shutdown)
 
-    # SocketModeHandler を別スレッドで起動
-    handler = SocketModeHandler(slackapp, os.environ["SLACK_APP_TOKEN"])
-    socket_thread = threading.Thread(target=handler.start, name="SlackSocketThread")
-    socket_thread.start()
-
     # メインスレッドは待機
-    try:
-        while not aichan.stop_event.is_set():
-            time.sleep(1)
-    except KeyboardInterrupt:
-        graceful_shutdown(signal.SIGINT, None)
+    while not aichan.stop_event.is_set():
+        time.sleep(1)
