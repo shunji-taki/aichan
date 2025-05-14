@@ -740,10 +740,12 @@ class AIChan:
             with sqlite3.connect(_AICHAN_SYSMEMORY_FILE) as conn:
                 cur = conn.cursor()
                 cur.execute(f"""
-                    UPDATE {_AICHAN_SYSMEMORY_TABLE} 
-                    SET content = ?, channel = ?
-                    WHERE user = ?
-                    """, (text, "base_prompt", self.boss_userid))
+                    INSERT INTO {_AICHAN_SYSMEMORY_TABLE} (user, channel, content)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(channel) DO UPDATE SET
+                        user = excluded.user,
+                        content = excluded.content
+                """, (self.boss_userid, "base_prompt", text))
 
             self.load_sysmemory()
 
