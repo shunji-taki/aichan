@@ -87,8 +87,23 @@ class AIChan:
         self.initialize_context_files()
 
         # Markdown書式変換
+        class SlackRendererWithCode(commonmarkslack.SlackRenderer):
+            def code_block(self, node, entering):
+                info = node.info or ''
+                code = node.literal or ''
+                code = code.replace('x-nl-x', '')
+                # Slackのコードブロックとして出力
+                if info:
+                    # TODO
+                    # codeとして '\n  printf("Hi there! \n")'が入ってきたとき、最初の\nはそのまま残し、二番目は\\nに変換する処理が必要
+                    self.lit(f"{info}\n```{code}```\n")
+                else:
+                    self.lit(f"```\n{code}```\n")
+                # nodeは子要素がないのでcontinue
+                return False  # これで子要素のvisitをスキップ
+    
         self.parser = commonmarkslack.Parser()
-        self.renderer = commonmarkslack.SlackRenderer()
+        self.renderer = SlackRendererWithCode()
 
         self.active_conversations = set()
 
@@ -517,6 +532,7 @@ class AIChan:
                 messages=ai_messages
             )
             ai_response = response.choices[0].message.content
+            self.logger.debug("AI response\n%s", ai_response)
             ast = self.parser.parse(ai_response)
             ai_response = self.renderer.render(ast)
 
