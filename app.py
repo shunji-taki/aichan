@@ -40,7 +40,7 @@ class AIChan:
     """AIChanの実装"""
     def __init__(self, slack_app):
         self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)
 
         if not self.logger.handlers:
             loghandler = logging.StreamHandler()
@@ -543,6 +543,11 @@ class AIChan:
             self.record_ai_completion_stats(ctk_prompt, ctk_reply, ctk_cached, event["channel"])
 
             thread_ts = event.get("thread_ts")
+            if not thread_ts:
+                thread_ts = event.get("ts")
+                
+            self.logger.debug("ai_respond() posting to : %s", event["channel"])
+
             m = self.slackapp.client.chat_postMessage(
                 channel=event["channel"],
                 thread_ts=thread_ts,
@@ -561,6 +566,8 @@ class AIChan:
         """
         メンションイベントを処理する
         """
+        self.logger.debug("event_app_mention()")
+
         if not self.is_recorded(event):
             self.record_user_input(event)
 
@@ -573,12 +580,15 @@ class AIChan:
                 self.active_conversations.add(thread_ts)
             self.ai_respond(event, say, in_thread=True)
         else:
-            self.ai_respond(event, say, in_thread=False)
+            self.ai_respond(event, say, in_thread=True)
+#            self.ai_respond(event, say, in_thread=False)
 
     def event_message(self, event: dict, say):
         """
         messageイベントを処理する
         """
+        self.logger.debug("event_message()")
+
         if not self.is_recorded(event):
             self.record_user_input(event)
 
@@ -600,12 +610,14 @@ class AIChan:
                 self.active_conversations.add(thread_ts)
                 self.ai_respond(event, say, in_thread=True)
             elif should_reply: #呼ばれてないスレッドでも時々反応する
-                self.ai_respond(event, say, in_thread=True)
+                pass #やめた
+                #self.ai_respond(event, say, in_thread=True)
         # チャンネルメッセージ
         else:
             # botへのmentionを含まないときだけ、ときどき反応する
             if should_reply:
-                self.ai_respond(event, say, in_thread=False)
+                pass #やめた
+                #self.ai_respond(event, say, in_thread=False)
 
     def get_slack_file_info(self, file_id, token):
         """Slack APIからファイルの情報を取得する"""

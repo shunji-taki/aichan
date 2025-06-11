@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Remote Python: Launch",
+        "type": "python",
+        "request": "launch",
+        "program": "${workspaceFolder}/app.py",   // 実行対象
+        "python": "/home/ubuntu/aichan/venv/bin/python",  // ← 仮想環境の python パス
+        "console": "integratedTerminal"
+      }
+    ]
+  }
